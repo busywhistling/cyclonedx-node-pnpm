@@ -1,0 +1,320 @@
+/*!
+This file is part of CycloneDX generator for PNPM projects.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+SPDX-License-Identifier: Apache-2.0
+Copyright (c) OWASP Foundation. All Rights Reserved.
+*/
+
+import { Builders, Enums, Factories, Serialize, Spec, Validation } from '@cyclonedx/cyclonedx-library'
+import { Argument, Command, Option } from 'commander'
+import { existsSync, openSync } from 'fs'
+import { dirname, resolve } from 'path'
+
+import { loadJsonFile, writeAllSync } from './_helpers'
+import { BomBuilder, TreeBuilder } from './builders'
+import { makeConsoleLogger } from './logger'
+
+enum OutputFormat {
+  JSON = 'JSON',
+  XML = 'XML',
+}
+
+enum Omittable {
+  Dev = 'dev',
+  Optional = 'optional',
+  Peer = 'peer',
+}
+
+const OutputStdOut = '-'
+
+interface CommandOptions {
+  ignoreNpmErrors: boolean
+  lockfileOnly: boolean
+  omit: Omittable[]
+  specVersion: Spec.Version
+  flattenComponents: boolean
+  shortPURLs: boolean
+  outputReproducible: boolean
+  outputFormat: OutputFormat
+  outputFile: string
+  validate: boolean | undefined
+  mcType: Enums.ComponentType
+  verbose: number
+}
+
+function makeCommand (process: NodeJS.Process): Command {
+  return new Command(
+  ).description(
+    'Create CycloneDX Software Bill of Materials (SBOM) from Node.js PNPM projects.'
+  ).usage(
+    // Need to add the `[--]` manually, to indicate how to stop a variadic option.
+    '[options] [--] [<package-manifest>]'
+  ).addOption(
+    new Option(
+      '--ignore-pnpm-errors',
+      'Whether to ignore errors of PNPM.\n' +
+            'This might be used, if "pnpm install" was run with "--force".'
+    ).default(false)
+  ).addOption(
+    new Option(
+      '--lockfile-only',
+      'Whether to only use the lock file, ignoring "node_modules".\n' +
+            'This means the output will be based only on the few details in and the tree described by the "package-lock.json", rather than the contents of "node_modules" directory.'
+    ).default(false)
+  ).addOption(
+    new Option(
+      '--omit <type...>',
+      'Dependency types to omit from the installation tree.' +
+            '(can be set multiple times)'
+    ).choices(
+      Object.values(Omittable).sort()
+    ).default(
+      process.env.NODE_ENV === 'production'
+        ? [Omittable.Dev]
+        : [],
+            `"${Omittable.Dev}" if the NODE_ENV environment variable is set to "production", otherwise empty`
+    )
+  ).addOption(
+    new Option(
+      '--flatten-components',
+      'Whether to flatten the components.\n' +
+            'This means the actual nesting of node packages is not represented in the SBOM result.'
+    ).default(false)
+  ).addOption(
+    new Option(
+      '--short-PURLs',
+      'Omit all qualifiers from PackageURLs.\n' +
+            'This causes information loss in trade-off shorter PURLs, which might improve ingesting these strings.'
+    ).default(false)
+  ).addOption(
+    new Option(
+      '--spec-version <version>',
+      'Which version of CycloneDX spec to use.'
+    ).choices(
+      Object.keys(Spec.SpecVersionDict).sort()
+    ).default(
+      Spec.Version.v1dot4
+    )
+  ).addOption(
+    new Option(
+      '--output-reproducible',
+      'Whether to go the extra mile and make the output reproducible.\n' +
+            'This requires more resources, and might result in loss of time- and random-based-values.'
+    ).env(
+      'BOM_REPRODUCIBLE'
+    )
+  ).addOption(
+    (function () {
+      const o = new Option(
+        '--output-format <format>',
+        'Which output format to use.'
+      ).choices(
+        Object.values(OutputFormat).sort()
+      ).default(
+        // the context is node/JavaScript - which should prefer JSON
+        OutputFormat.JSON
+      )
+      const oldParseArg = o.parseArg ?? // might do input validation on choices, etc...
+                (v => v) // fallback: pass-through
+      /* @ts-expect-error TS2304 */
+      o.parseArg = (v, p) => oldParseArg(v.toUpperCase(), p)
+      return o
+    })()
+  ).addOption(
+    new Option(
+      '--output-file <file>',
+      'Path to the output file.\n' +
+            `Set to "${OutputStdOut}" to write to STDOUT.`
+    ).default(
+      OutputStdOut,
+      'write to STDOUT'
+    )
+  ).addOption(
+    new Option(
+      '--validate',
+      'Validate resulting BOM before outputting. ' +
+            'Validation is skipped, if requirements not met. See the README.'
+    ).default(undefined)
+  ).addOption(
+    new Option(
+      '--no-validate',
+      'Disable validation of resulting BOM.'
+    )
+  ).addOption(
+    new Option(
+      '--mc-type <type>',
+      'Type of the main component.'
+    ).choices(
+      // Object.values(Enums.ComponentType) -- use all possible
+      [ // for the PNPM context only the following make sense:
+        Enums.ComponentType.Application,
+        Enums.ComponentType.Firmware,
+        Enums.ComponentType.Library
+      ].sort()
+    ).default(
+      Enums.ComponentType.Application
+    )
+  ).addOption(
+    new Option(
+      '-v, --verbose',
+      'Increase the verbosity of messages. Use multiple times to increase the verbosity even more.'
+    ).argParser<number>(
+      function (_: any, previous: number): number {
+        return previous + 1
+      }
+    ).default(0)
+  ).addArgument(
+    new Argument(
+      '[<package-manifest>]',
+      "Path to project's manifest file."
+    ).default(
+      'package.json',
+      '"package.json" file in current working directory'
+    )
+  ).version(
+    // that is supposed to be the last option in the list on the help page.
+    loadJsonFile(resolve(module.path, '..', 'package.json')).version as string
+  ).allowExcessArguments(
+    false
+  )
+}
+
+const ExitCode: Readonly<Record<string, number>> = Object.freeze({
+  SUCCESS: 0,
+  FAILURE: 1,
+  INVALID: 2
+})
+
+export async function run (process: NodeJS.Process): Promise<number> {
+  process.title = 'cyclonedx-node-pnpm'
+
+  const program = makeCommand(process)
+  program.parse(process.argv)
+
+  const options: CommandOptions = program.opts()
+  const myConsole = makeConsoleLogger(options.verbose)
+  myConsole.debug('DEBUG | options: %j', options)
+
+  const packageFile = resolve(process.cwd(), program.args[0] ?? 'package.json')
+  if (!existsSync(packageFile)) {
+    throw new Error(`missing project's manifest file: ${packageFile}`)
+  }
+  myConsole.debug('DEBUG | packageFile:', packageFile)
+  const projectDir = dirname(packageFile)
+  myConsole.info('INFO  | projectDir:', projectDir)
+
+  if (existsSync(resolve(projectDir, 'pnpm-lock.yaml'))) {
+    myConsole.info('INFO  | detected a pnpm package lock file')
+  } else if (!options.lockfileOnly && existsSync(resolve(projectDir, 'node_modules'))) {
+    myConsole.info('INFO  | detected a `node_modules` dir')
+  } else {
+    myConsole.warn('WARN  | ? Did you forget to run `pnpm install` on your project accordingly ?')
+    myConsole.error('ERROR | No evidence: no pnpm package lock file')
+    if (!options.lockfileOnly) {
+      myConsole.error('ERROR | No evidence: no `node_modules` dir')
+    }
+    throw new Error('missing evidence')
+  }
+
+  const extRefFactory = new Factories.FromNodePackageJson.ExternalReferenceFactory()
+
+  myConsole.log('LOG   | gathering BOM data ...')
+  const bom = new BomBuilder(
+    new Builders.FromNodePackageJson.ToolBuilder(extRefFactory),
+    new Builders.FromNodePackageJson.ComponentBuilder(
+      extRefFactory,
+      new Factories.LicenseFactory()
+    ),
+    new TreeBuilder(),
+    new Factories.FromNodePackageJson.PackageUrlFactory('pnpm'),
+    {
+      ignorePnpmErrors: options.ignoreNpmErrors,
+      metaComponentType: options.mcType,
+      lockfileOnly: options.lockfileOnly,
+      omitDependencyTypes: options.omit,
+      reproducible: options.outputReproducible,
+      flattenComponents: options.flattenComponents,
+      shortPURLs: options.shortPURLs
+    },
+    myConsole
+  ).buildFromProjectDir(projectDir, process)
+
+  const spec = Spec.SpecVersionDict[options.specVersion]
+  if (undefined === spec) {
+    throw new Error('unsupported spec-version')
+  }
+
+  let serializer: Serialize.Types.Serializer
+  let validator: Validation.Types.Validator
+  switch (options.outputFormat) {
+    case OutputFormat.XML:
+      serializer = new Serialize.XmlSerializer(new Serialize.XML.Normalize.Factory(spec))
+      validator = new Validation.XmlValidator(spec.version)
+      break
+    case OutputFormat.JSON:
+      serializer = new Serialize.JsonSerializer(new Serialize.JSON.Normalize.Factory(spec))
+      validator = new Validation.JsonValidator(spec.version)
+      break
+  }
+
+  myConsole.log('LOG   | serializing BOM ...')
+  const serialized = serializer.serialize(bom, {
+    sortLists: options.outputReproducible,
+    space: 2
+  })
+
+  if (options.validate ?? true) {
+    myConsole.log('LOG   | try validating BOM result ...')
+    try {
+      const validationErrors = await validator.validate(serialized)
+      if (validationErrors === null) {
+        myConsole.info('INFO  | BOM result appears valid')
+      } else {
+        myConsole.debug(`DEBUG | BOM result invalid. details: ${validationErrors}`)
+        myConsole.error('ERROR | Failed to generate valid BOM')
+        myConsole.warn(
+          'WARN  | Please report the issue and provide the pnpm lock file of the current project to:\n' +
+                    '      | https://github.com/CycloneDX/cyclonedx-node-pnpm/issues/new?template=ValidationError-report.md&labels=ValidationError&title=%5BValidationError%5D')
+        return ExitCode.FAILURE
+      }
+    } catch (err) {
+      if (err instanceof Validation.MissingOptionalDependencyError) {
+        if (options.validate === true) {
+          // if explicitly requested to validate, then warn about skip
+          myConsole.warn('WARN  | skipped validating BOM:', err.message)
+          // @TODO breaking change: forward error, do not skip/continue
+        } else {
+          myConsole.info('INFO  | skipped validating BOM:', err.message)
+        }
+      } else {
+        myConsole.error('ERROR | unexpected error')
+        throw err
+      }
+    }
+  }
+
+  myConsole.log('LOG   | writing BOM to', options.outputFile)
+  const written = await writeAllSync(
+    options.outputFile === OutputStdOut
+      ? process.stdout.fd
+      : openSync(resolve(process.cwd(), options.outputFile), 'w'),
+    serialized
+  )
+  myConsole.info('INFO  | wrote %d bytes to %s', written, options.outputFile)
+
+  return written > 0
+    ? ExitCode.SUCCESS
+    : ExitCode.FAILURE
+}

@@ -1,0 +1,112 @@
+{
+  "name": "@cyclonedx/cyclonedx-pnpm",
+  "version": "0.0.1",
+  "description": "Create CycloneDX Software Bill of Materials (SBOM) from PNPM projects",
+  "license": "Apache-2.0",
+  "keywords": [
+    "CycloneDX",
+    "SBOM",
+    "BOM",
+    "inventory",
+    "bill-of-materials",
+    "software-bill-of-materials",
+    "component",
+    "dependency",
+    "package-url",
+    "PURL",
+    "spdx",
+    "node",
+    "pnpm"
+  ],
+  "homepage": "https://github.com/CycloneDX/cyclonedx-node-pnpm#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CycloneDX/cyclonedx-node-pnpm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CycloneDX/cyclonedx-node-pnpm/issues"
+  },
+  "funding": [
+    {
+      "type": "individual",
+      "url": "https://owasp.org/donate/?reponame=www-project-cyclonedx&title=OWASP+CycloneDX"
+    }
+  ],
+  "author": {
+    "name": "Jan Kowalleck",
+    "email": "jan.kowalleck@gmail.com"
+  },
+  "contributors": [
+    {
+      "name": "Paramjit Singh",
+      "email": "contact@paramjit.org"
+    },
+    {
+      "name": "Jan Kowalleck",
+      "email": "jan.kowalleck@gmail.com"
+    },
+    {
+      "name": "Alex Miller",
+      "email": "codex.nz@gmail.com"
+    }
+  ],
+  "dependencies": {
+    "@cyclonedx/cyclonedx-library": "6.5.1",
+    "commander": "12.0.0",
+    "normalize-package-data": "6",
+    "packageurl-js": "1.2.1",
+    "xmlbuilder2": "3.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "ts5.4",
+    "@types/normalize-package-data": "2.4.4",
+    "eslint": "8.57.0",
+    "eslint-config-love": "47.0.0",
+    "eslint-config-standard": "17.1.0",
+    "eslint-plugin-header": "3.1.1",
+    "eslint-plugin-simple-import-sort": "12.1.0",
+    "fast-glob": "3.3.2",
+    "imurmurhash": "0.1.4",
+    "jest": "29.7.0",
+    "jest-junit": "16.0.0",
+    "npm-run-all": "4.1.5",
+    "typescript": "5.4.5"
+  },
+  "type": "commonjs",
+  "engines": {
+    "node": ">=14",
+    "npm": "6 - 10"
+  },
+  "directories": {
+    "doc": "docs",
+    "src": "src",
+    "lib": "dist",
+    "test": "tests",
+    "example": "demo"
+  },
+  "bin": {
+    "cyclonedx-npm": "./bin/cyclonedx-npm-cli.js"
+  },
+  "main": "./dist/cli.js",
+  "exports": "./dist/index.js",
+  "scripts": {
+    "prepublish": "npm run build",
+    "prepublishOnly": "run-s -lc build test",
+    "lint": "tsc --noEmit",
+    "prebuild": "node -r fs -e 'fs.rmSync(`dist`,{recursive:true,force:true})'",
+    "build": "tsc -b ./tsconfig.json",
+    "cs-fix": "eslint --fix .",
+    "setup-tests": "echo 'noting yet'",
+    "test": "run-p --aggregate-output -lc test:*",
+    "test:jest": "jest --passWithNoTests",
+    "test:standard": "eslint .",
+    "dogfooding:pnpx": "pnpx .",
+    "dogfooding:pnpm-exec": "pnpm exec .",
+    "dogfooding:direct": "node -- bin/cyclonedx-npm-cli.js"
+  },
+  "jest-junit": {
+    "suiteName": "jest tests",
+    "outputDirectory": "reports/jest",
+    "outputName": "tests.junit.xml"
+  }
+}
